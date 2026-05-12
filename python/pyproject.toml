@@ -13,6 +13,14 @@ dependencies = [
 [project.optional-dependencies]
 vlm = ["Pillow", "num2words", "torchvision"]
 lora = ["peft"]
+# Dev deps for the TTS reference work (Plan 2) and the Plan 1 fixture
+# generators in tests/fixtures/. Requires Python 3.11+ in practice
+# because kokoro-onnx pulls in onnxruntime, which has no 3.9 wheels.
+dev = [
+    "kokoro-onnx",
+    "soundfile",
+    "scipy",
+]
 
 [project.scripts]
 cactus = "src.cli:main"

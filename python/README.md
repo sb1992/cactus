@@ -428,6 +428,16 @@ Tests are in `python/tests/`:
 - `test_graph.py` — Graph elementwise, composed, tensor, activation, and softmax ops
 - `test_model.py` — VLM completion/embeddings, Whisper transcription/embeddings (auto-downloads weights if missing)
 
+### Dev environment for kernel reference fixtures
+
+Generating the C++ kernel reference fixtures under `tests/fixtures/` (FFT/STFT/LSTM/ConvTranspose1d for Plan 1, Kokoro TTS for Plan 2) needs the optional `dev` extra:
+
+```bash
+pip install -e "python/[dev]"
+```
+
+This pulls in `kokoro-onnx`, `soundfile`, and `scipy`. `kokoro-onnx` depends on `onnxruntime`, which has no Python 3.9 wheels, so use Python 3.11+ for fixture-generation work (the package itself targets `>=3.10`).
+
 ## See Also
 
 - [Cactus Engine API](/docs/cactus_engine.md) — Full C API reference that the Python bindings wrap
