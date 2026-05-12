@@ -54,5 +54,38 @@ sig = irfft(spec, n=N).astype(np.float32)
 write_f32(os.path.join(OUT, "ifft_input_256_singlebin.bin"), rfft_to_interleaved(spec, N))
 write_f32(os.path.join(OUT, "ifft_output_256_singlebin.bin"), sig)
 
+from scipy.signal import stft, istft
+
+# Test 4: STFT/ISTFT round-trip on a chirp signal
+fs = 24000
+duration = 0.5
+N = int(fs * duration)
+t = np.arange(N) / fs
+chirp = np.sin(2 * np.pi * (200 + 1000 * t) * t).astype(np.float32)
+
+n_fft = 512
+hop = 128
+
+f, tt, Zxx = stft(chirp, fs=fs, nperseg=n_fft, noverlap=n_fft - hop,
+                  window='hann', boundary=None, padded=False)
+write_f32(os.path.join(OUT, "stft_input_chirp.bin"), chirp)
+
+# Save Zxx as interleaved [re, im] per frame, frame-major:
+# layout: n_frames * (n_fft//2+1) * 2 floats
+n_freq = n_fft // 2 + 1
+n_frames = Zxx.shape[1]
+stft_out = np.empty((n_frames, n_freq, 2), dtype=np.float32)
+stft_out[..., 0] = Zxx.T.real
+stft_out[..., 1] = Zxx.T.imag
+write_f32(os.path.join(OUT, "stft_output_chirp.bin"), stft_out)
+
+# ISTFT round-trip via scipy reference
+_, recovered = istft(Zxx, fs=fs, nperseg=n_fft, noverlap=n_fft - hop,
+                     window='hann', boundary=None)
+recovered = recovered[:N].astype(np.float32)
+write_f32(os.path.join(OUT, "istft_output_chirp.bin"), recovered)
+
+print(f"STFT params: n_fft={n_fft}, hop={hop}, window=hann, n_frames={n_frames}")
+
 print(f"Wrote fixtures to {OUT}")
 print(f"  Files: {sorted(os.listdir(OUT))}")
