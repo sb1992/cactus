@@ -46,5 +46,13 @@ sig = np.random.randn(512).astype(np.float32)
 write_f32(os.path.join(OUT, "fft_input_512_random.bin"), sig)
 write_f32(os.path.join(OUT, "fft_output_512_random.bin"), rfft_to_interleaved(rfft(sig), 512))
 
+# Test 3: iFFT round-trip — single-bin spectrum at k=5 → known time signal
+N = 256
+spec = np.zeros(N // 2 + 1, dtype=np.complex64)
+spec[5] = 1.0  # single bin at k=5
+sig = irfft(spec, n=N).astype(np.float32)
+write_f32(os.path.join(OUT, "ifft_input_256_singlebin.bin"), rfft_to_interleaved(spec, N))
+write_f32(os.path.join(OUT, "ifft_output_256_singlebin.bin"), sig)
+
 print(f"Wrote fixtures to {OUT}")
 print(f"  Files: {sorted(os.listdir(OUT))}")

@@ -87,10 +87,65 @@ static bool test_r2c_512_random_matches_scipy() {
     return errors == 0;
 }
 
+static bool test_c2r_256_singlebin_matches_scipy() {
+    auto input    = load_f32(fixture_path("ifft_input_256_singlebin.bin"));
+    auto expected = load_f32(fixture_path("ifft_output_256_singlebin.bin"));
+    if (input.size() != (256 / 2 + 1) * 2 || expected.size() != 256) {
+        std::fprintf(stderr, "ifft fixture sizes wrong: input=%zu expected=%zu\n",
+                     input.size(), expected.size());
+        return false;
+    }
+    std::vector<float> output(256);
+    cactus_fft_c2r(input.data(), output.data(), 256);
+
+    int errors = 0;
+    for (size_t i = 0; i < 256; ++i) {
+        const float diff = std::fabs(output[i] - expected[i]);
+        if (diff > 1e-4f) {
+            if (errors < 5) {
+                std::fprintf(stderr,
+                             "c2r 256-singlebin mismatch i=%zu out=%g exp=%g diff=%g\n",
+                             i, output[i], expected[i], diff);
+            }
+            ++errors;
+        }
+    }
+    return errors == 0;
+}
+
+static bool test_r2c_then_c2r_round_trip_512() {
+    auto input = load_f32(fixture_path("fft_input_512_random.bin"));
+    if (input.size() != 512) {
+        std::fprintf(stderr, "round-trip fixture size wrong: input=%zu\n", input.size());
+        return false;
+    }
+    std::vector<float> spec((512 / 2 + 1) * 2);
+    std::vector<float> output(512);
+
+    cactus_fft_r2c(input.data(), spec.data(), 512);
+    cactus_fft_c2r(spec.data(), output.data(), 512);
+
+    int errors = 0;
+    for (size_t i = 0; i < 512; ++i) {
+        const float diff = std::fabs(input[i] - output[i]);
+        if (diff > 1e-4f) {
+            if (errors < 5) {
+                std::fprintf(stderr,
+                             "round-trip mismatch i=%zu in=%g out=%g diff=%g\n",
+                             i, input[i], output[i], diff);
+            }
+            ++errors;
+        }
+    }
+    return errors == 0;
+}
+
 int main() {
     TestUtils::TestRunner runner("cactus_fft_r2c");
-    runner.run_test("R2C 256 sine matches scipy",   test_r2c_256_sine_matches_scipy());
-    runner.run_test("R2C 512 random matches scipy", test_r2c_512_random_matches_scipy());
+    runner.run_test("R2C 256 sine matches scipy",       test_r2c_256_sine_matches_scipy());
+    runner.run_test("R2C 512 random matches scipy",     test_r2c_512_random_matches_scipy());
+    runner.run_test("C2R 256 single-bin matches scipy", test_c2r_256_singlebin_matches_scipy());
+    runner.run_test("R2C -> C2R 512 round-trip",        test_r2c_then_c2r_round_trip_512());
     runner.print_summary();
     return runner.all_passed() ? 0 : 1;
 }

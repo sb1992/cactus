@@ -19,6 +19,18 @@ extern "C" {
 // unpacks PFFFT's packed real-FFT layout into scipy's interleaved layout.
 void cactus_fft_r2c(const float* input, float* output, size_t n);
 
+// Complex-to-real inverse FFT (reverse of cactus_fft_r2c).
+//
+//   input:  pointer to (N/2 + 1) * 2 floats interleaved
+//           [re_0, im_0, re_1, im_1, ..., re_{N/2}, im_{N/2}]
+//           (scipy.fft.rfft layout — same as cactus_fft_r2c output)
+//   output: pointer to N float samples (time domain), normalized
+//           (divided by N internally so it inverts cactus_fft_r2c at
+//           machine-epsilon precision).
+//   n:      transform size (must satisfy PFFFT constraints:
+//           n >= 32 and n is a multiple of 32 for the SIMD path).
+void cactus_fft_c2r(const float* input, float* output, size_t n);
+
 #ifdef __cplusplus
 }
 #endif
