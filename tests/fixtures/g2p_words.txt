@@ -1,0 +1,200 @@
+hello	HH AH L OW
+world	W ER L D
+cactus	K AE K T AH S
+the	DH AH
+quick	K W IH K
+brown	B R AW N
+fox	F AA K S
+jumps	JH AH M P S
+over	OW V ER
+lazy	L EY Z IY
+dog	D AO G
+cat	K AE T
+sing	S IH NG
+read	R EH D
+write	R AY T
+computer	K AH M P Y UW T ER
+phone	F OW N
+screen	S K R IY N
+keyboard	K IY B AO R D
+mouse	M AW S
+table	T EY B AH L
+chair	CH EH R
+window	W IH N D OW
+door	D AO R
+wall	W AO L
+floor	F L AO R
+ceiling	S IY L IH NG
+light	L AY T
+dark	D AA R K
+bright	B R AY T
+morning	M AO R N IH NG
+evening	IY V N IH NG
+night	N AY T
+day	D EY
+week	W IY K
+month	M AH N TH
+year	Y IH R
+time	T AY M
+minute	M IH N AH T
+second	S EH K AH N D
+hour	AW ER
+clock	K L AA K
+watch	W AA CH
+calendar	K AE L AH N D ER
+date	D EY T
+today	T AH D EY
+tomorrow	T AH M AA R OW
+yesterday	Y EH S T ER D EY
+past	P AE S T
+future	F Y UW CH ER
+house	HH AW S
+home	HH OW M
+apartment	AH P AA R T M AH N T
+city	S IH T IY
+town	T AW N
+village	V IH L AH JH
+country	K AH N T R IY
+world	W ER L D
+earth	ER TH
+planet	P L AE N AH T
+river	R IH V ER
+ocean	OW SH AH N
+mountain	M AW N T AH N
+valley	V AE L IY
+forest	F AO R AH S T
+tree	T R IY
+flower	F L AW ER
+grass	G R AE S
+leaf	L IY F
+branch	B R AE N CH
+water	W AO T ER
+fire	F AY ER
+earth	ER TH
+wind	W AY N D
+sun	S AH N
+moon	M UW N
+star	S T AA R
+sky	S K AY
+cloud	K L AW D
+rain	R EY N
+food	F UW D
+drink	D R IH NG K
+apple	AE P AH L
+bread	B R EH D
+cheese	CH IY Z
+milk	M IH L K
+coffee	K AA F IY
+tea	T IY
+sugar	SH UH G ER
+salt	S AO L T
+happy	HH AE P IY
+sad	S AE D
+angry	AE NG G R IY
+tired	T AY ER D
+hungry	HH AH NG G R IY
+thirsty	TH ER S T IY
+cold	K OW L D
+hot	HH AA T
+warm	W AO R M
+cool	K UW L
+big	B IH G
+small	S M AO L
+large	L AA R JH
+tiny	T AY N IY
+huge	HH Y UW JH
+short	SH AO R T
+long	L AO NG
+tall	T AO L
+narrow	N EH R OW
+wide	W AY D
+fast	F AE S T
+slow	S L OW
+early	ER L IY
+late	L EY T
+first	F ER S T
+last	L AE S T
+new	N UW
+old	OW L D
+young	Y AH NG
+ancient	EY N CH AH N T
+good	G UH D
+bad	B AE D
+right	R AY T
+wrong	R AO NG
+true	T R UW
+false	F AO L S
+real	R IY L
+fake	F EY K
+easy	IY Z IY
+hard	HH AA R D
+open	OW P AH N
+close	K L OW S
+start	S T AA R T
+stop	S T AA P
+begin	B IH G IH N
+end	EH N D
+finish	F IH N IH SH
+continue	K AH N T IH N Y UW
+arrive	ER AY V
+leave	L IY V
+walk	W AO K
+run	R AH N
+jump	JH AH M P
+sit	S IH T
+stand	S T AE N D
+sleep	S L IY P
+wake	W EY K
+eat	IY T
+drink	D R IH NG K
+speak	S P IY K
+kokoro	
+cactusvoice	
+apfeltree	
+bayesify	
+crustacular	
+dharmalogic	
+embolism	EH M B OW L IH Z AH M
+febrility	
+gastrokind	
+heliosphere	
+ichneumon	
+jhumka	
+klieglight	
+luminoid	
+mechanik	
+nyctolopia	
+obfuscate	AA B F AH S K EY T
+plenitude	
+quagmire	K W AE G M AY ER
+rhabdomyolysis	
+syzygy	
+triskelion	
+unguently	
+vorpal	
+wavefront	
+xanthium	
+ylang	
+zeitgeist	T S AY T G AY S T
+autochthon	
+brachycephalic	
+cuneiform	K Y UW N IY AH F AO R M
+dyspeptic	D IH S P EH P T IH K
+ephemeris	
+fluorescein	
+glaucoma	G L AO K OW M AH
+hagiography	HH AE G IY AA G R AH F IY
+iatrogenic	
+jackknife	
+kyphosis	
+laparotomy	
+morphogenesis	M AO R F AH JH EH N AH S AH S
+necropolis	N AH K R AA P AH L AH S
+oligarchy	AA L AH G AA R K IY
+pantomime	P AE N T AH M AY M
+quintessence	K W IH N T EH S AH N S
+rapscallion	
+saturnalian	
+tachycardia	T AA K IY K AA R D IY AH
+ubiquitous	Y UW B IH K W IH T AH S
+vexillology	
