@@ -41,3 +41,6 @@ tests/fixtures/data/
 vision_activations.json
 gemma-4-eap-extras/
 .githooks/
+assets/kokoro/*.onnx
+assets/kokoro/voices.json
+assets/kokoro/voices.bin
