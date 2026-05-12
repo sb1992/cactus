@@ -2204,6 +2204,13 @@ def create_parser():
     convert_parser.add_argument('--token', help='HuggingFace API token')
     convert_parser.add_argument('--lora', help='Path to LoRA adapter (local path or HuggingFace ID) to merge before conversion')
 
+    # `run-tts` is dispatched directly from main() so cli_run_tts.main can
+    # own its own argument parsing (text + flags). This subparser exists
+    # only so it shows up in `cactus --help`.
+    subparsers.add_parser('run-tts',
+                          help='Synthesize text to a WAV file (Kokoro TTS)',
+                          add_help=False)
+
     return parser
 
 
@@ -2222,9 +2229,14 @@ def preprocess_eval_args(parser, argv):
 
 def main():
     """Main entry point for the Cactus CLI."""
-    parser = create_parser()
-
     argv = sys.argv[1:]
+
+    # Dispatch run-tts directly so its module owns argument parsing.
+    if argv and argv[0] == 'run-tts':
+        from .cli_run_tts import main as run_tts_main
+        sys.exit(run_tts_main(argv[1:]))
+
+    parser = create_parser()
     args = preprocess_eval_args(parser, argv)
 
     if args.command == 'download':
