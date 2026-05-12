@@ -162,192 +162,6 @@ bool Predictor::load_weights(const std::string& dir) {
 }
 
 // ----------------------------------------------------------------------
-// AdaLayerNorm: x is (1, C, T) channel-first. The reference impl
-// transposes to (1, T, C), runs F.layer_norm(x, (C,)) without affine,
-// then applies (1 + gamma(s)) * x + beta(s). We do the same in place
-// over channel-first storage.
-// ----------------------------------------------------------------------
-void Predictor::ada_layer_norm(float* x, int C, int T, const float* style128,
-                                const AdaLNFc& fc) const {
-    // h = fc(s); gamma = h[:C], beta = h[C:]
-    std::vector<float> h(2 * C, 0.0f);
-    for (int i = 0; i < 2 * C; ++i) {
-        float acc = fc.b[i];
-        const float* row = &fc.w[static_cast<size_t>(i) * STYLE_DIM];
-        for (int k = 0; k < STYLE_DIM; ++k) acc += row[k] * style128[k];
-        h[i] = acc;
-    }
-    const float* gamma = h.data();
-    const float* beta  = h.data() + C;
-
-    // LayerNorm over channel axis (no affine). We replicate the reference's
-    // exact ordering: layer_norm runs over the channel dim as the "feature".
-    // For channel-first (C, T), per-time-step normalization across C.
-    internal::channel_layer_norm(x, C, T, /*gamma*/nullptr, /*beta*/nullptr,
-                                 LAYERNORM_EPS);
-
-    // Apply (1 + gamma) * x + beta, broadcast over T.
-    for (int c = 0; c < C; ++c) {
-        const float g = 1.0f + gamma[c];
-        const float b = beta[c];
-        float* row = &x[static_cast<size_t>(c) * T];
-        for (int t = 0; t < T; ++t) row[t] = g * row[t] + b;
-    }
-}
-
-// ----------------------------------------------------------------------
-// AdaIN1d: x is (1, C, T) channel-first. InstanceNorm1d (per-channel
-// across T) with no affine (the v0_19 .pth is missing the .norm.weight/
-// .norm.bias tensors so PyTorch defaults to weight=1, bias=0; equivalent
-// to affine=False), then (1 + gamma(s)) * x + beta(s).
-// ----------------------------------------------------------------------
-void Predictor::ada_in_1d(float* x, int C, int T, const float* style128,
-                           const AdaLNFc& fc) const {
-    std::vector<float> h(2 * C, 0.0f);
-    for (int i = 0; i < 2 * C; ++i) {
-        float acc = fc.b[i];
-        const float* row = &fc.w[static_cast<size_t>(i) * STYLE_DIM];
-        for (int k = 0; k < STYLE_DIM; ++k) acc += row[k] * style128[k];
-        h[i] = acc;
-    }
-    const float* gamma = h.data();
-    const float* beta  = h.data() + C;
-
-    internal::instance_norm_1d(x, C, T, /*gamma*/nullptr, /*beta*/nullptr,
-                               INSTNORM_EPS);
-    for (int c = 0; c < C; ++c) {
-        const float g = 1.0f + gamma[c];
-        const float b = beta[c];
-        float* row = &x[static_cast<size_t>(c) * T];
-        for (int t = 0; t < T; ++t) row[t] = g * row[t] + b;
-    }
-}
-
-// ----------------------------------------------------------------------
-// Depthwise ConvTranspose1d (groups=C, in_channels_per_group=1, out=1,
-// stride=2, kernel=3, padding=1, output_padding=1). PyTorch weight shape:
-// (in_channels, out_channels/groups, K) = (C, 1, 3).
-//
-// Output length: T_out = (T - 1) * stride - 2*padding + kernel + output_padding
-//               = (T-1)*2 + 0 + 3 + 1  -- wait: -2*1 + 3 + 1 = -2+3+1 = 2
-//               = 2*(T-1) + 2 = 2T
-//
-// Standard ConvTranspose1d formula:
-//   out[c, t_out] = bias[c] +
-//                   sum_{k} x[c, i_in] * w[c, 0, k]
-//   where t_out + padding - k = i_in * stride  AND  0 <= i_in < T
-// ----------------------------------------------------------------------
-void Predictor::conv_transpose_1d_pool(const Conv1d& pool,
-                                        const std::vector<float>& in_cf, int C, int T,
-                                        std::vector<float>& out_cf) const {
-    constexpr int K = 3;
-    constexpr int stride = 2;
-    constexpr int padding = 1;
-    constexpr int output_padding = 1;
-    const int T_out = (T - 1) * stride - 2 * padding + K + output_padding;
-    out_cf.assign(static_cast<size_t>(C) * T_out, 0.0f);
-    for (int c = 0; c < C; ++c) {
-        const float* w = &pool.w[static_cast<size_t>(c) * K];  // (C, 1, K) -> row c is K floats
-        const float bias = pool.b[c];
-        const float* in_row = &in_cf[static_cast<size_t>(c) * T];
-        float* out_row = &out_cf[static_cast<size_t>(c) * T_out];
-        for (int t_out = 0; t_out < T_out; ++t_out) out_row[t_out] = bias;
-        for (int i_in = 0; i_in < T; ++i_in) {
-            const float xv = in_row[i_in];
-            for (int k = 0; k < K; ++k) {
-                // t_out + padding - k = i_in * stride  =>  t_out = i_in*stride + k - padding
-                const int t_out = i_in * stride + k - padding;
-                if (t_out < 0 || t_out >= T_out) continue;
-                out_row[t_out] += xv * w[k];
-            }
-        }
-    }
-}
-
-// ----------------------------------------------------------------------
-// Nearest-neighbor upsample by factor 2 (channel-first).
-// ----------------------------------------------------------------------
-void Predictor::upsample_nearest_2x(const std::vector<float>& in_cf, int C, int T,
-                                     std::vector<float>& out_cf) const {
-    out_cf.assign(static_cast<size_t>(C) * 2 * T, 0.0f);
-    for (int c = 0; c < C; ++c) {
-        const float* in_row = &in_cf[static_cast<size_t>(c) * T];
-        float* out_row = &out_cf[static_cast<size_t>(c) * 2 * T];
-        for (int t = 0; t < T; ++t) {
-            out_row[2*t]     = in_row[t];
-            out_row[2*t + 1] = in_row[t];
-        }
-    }
-}
-
-// ----------------------------------------------------------------------
-// AdainResBlk1d:
-//   residual: AdaIN1d -> LeakyReLU(0.2) -> pool? -> conv1
-//             -> AdaIN1d -> LeakyReLU(0.2) -> conv2
-//   shortcut: upsample? -> conv1x1?
-//   out = (residual + shortcut) * rsqrt(2)
-// ----------------------------------------------------------------------
-void Predictor::run_adain_res_blk(const AdainResBlk1d& blk, const float* style128,
-                                   const std::vector<float>& in_cf, int T,
-                                   std::vector<float>& out_cf, int& T_out) const {
-    const int Ci = blk.dim_in;
-    const int Co = blk.dim_out;
-
-    // ---- residual path ----
-    std::vector<float> r = in_cf;  // (Ci, T)
-    ada_in_1d(r.data(), Ci, T, style128, blk.norm1_fc);
-    internal::leaky_relu_inplace(r.data(), r.size(), LEAKY_SLOPE);
-
-    int T_after_pool = T;
-    std::vector<float> r_pool;
-    if (blk.upsample) {
-        conv_transpose_1d_pool(blk.pool, r, Ci, T, r_pool);
-        T_after_pool = 2 * T;
-        r.swap(r_pool);
-    }
-
-    // conv1: (Ci -> Co, K=3, p=1)
-    std::vector<float> r_c1;
-    internal::conv1d_padded(r.data(), Ci, T_after_pool,
-                            blk.conv1.w.data(), blk.conv1.b.data(),
-                            Co, 3, 1, r_c1);
-
-    ada_in_1d(r_c1.data(), Co, T_after_pool, style128, blk.norm2_fc);
-    internal::leaky_relu_inplace(r_c1.data(), r_c1.size(), LEAKY_SLOPE);
-
-    std::vector<float> r_c2;
-    internal::conv1d_padded(r_c1.data(), Co, T_after_pool,
-                            blk.conv2.w.data(), blk.conv2.b.data(),
-                            Co, 3, 1, r_c2);
-
-    // ---- shortcut path ----
-    std::vector<float> sc;
-    int T_sc = T;
-    if (blk.upsample) {
-        upsample_nearest_2x(in_cf, Ci, T, sc);
-        T_sc = 2 * T;
-    } else {
-        sc = in_cf;
-    }
-    if (blk.learned_sc) {
-        // 1x1 conv (Ci -> Co), no bias
-        std::vector<float> sc_out;
-        internal::conv1d_padded(sc.data(), Ci, T_sc,
-                                blk.conv1x1.w.data(), nullptr,
-                                Co, 1, 0, sc_out);
-        sc.swap(sc_out);
-    }
-
-    // out = (residual + shortcut) * rsqrt(2)
-    const float inv_sqrt2 = 1.0f / std::sqrt(2.0f);
-    out_cf.assign(static_cast<size_t>(Co) * T_after_pool, 0.0f);
-    for (size_t i = 0; i < out_cf.size(); ++i) {
-        out_cf[i] = (r_c2[i] + sc[i]) * inv_sqrt2;
-    }
-    T_out = T_after_pool;
-}
-
-// ----------------------------------------------------------------------
 // run_until_stage — main pipeline
 // ----------------------------------------------------------------------
 void Predictor::run_until_stage(const int64_t* /*phonemes*/, int T,
@@ -418,7 +232,8 @@ void Predictor::run_until_stage(const int64_t* /*phonemes*/, int T,
         }
 
         // ---- AdaLayerNorm (in place on channel-first (512, T)) ----
-        ada_layer_norm(x.data(), D_HID, T, style128, dur_enc_aln_[i]);
+        internal::ada_layer_norm(x.data(), D_HID, T, style128,
+                                 dur_enc_aln_[i], LAYERNORM_EPS);
 
         // Capture post-AdaLN BEFORE re-cat (matches fixture convention)
         if ((i == 0 && last == Stage::DurEncAln1) ||
@@ -582,7 +397,8 @@ void Predictor::run_until_stage(const int64_t* /*phonemes*/, int T,
         for (int b = 0; b < 3; ++b) {
             std::vector<float> nxt;
             int Tnxt = 0;
-            run_adain_res_blk(blocks[b], style128, cur, Tcur, nxt, Tnxt);
+            internal::run_adain_res_blk(blocks[b], style128, cur, Tcur,
+                                        nxt, Tnxt, LEAKY_SLOPE, INSTNORM_EPS);
             cur.swap(nxt);
             Tcur = Tnxt;
             const Stage stage_for_b =

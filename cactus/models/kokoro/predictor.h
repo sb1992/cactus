@@ -1,5 +1,7 @@
 #pragma once
 
+#include "kokoro_internal.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -85,37 +87,11 @@ private:
         LstmDir fwd, bwd;
     };
 
-    // ---- AdaLayerNorm fc projection: Linear(STYLE_DIM=128 -> 2*C)
-    struct AdaLNFc {
-        std::vector<float> w;      // (2C, 128)
-        std::vector<float> b;      // (2C,)
-    };
-
-    // ---- Conv1d weight bundle (folded weight_norm)
-    struct Conv1d {
-        std::vector<float> w;      // (C_out, C_in, K)
-        std::vector<float> b;      // (C_out,)  (may be empty for no-bias variants)
-        int C_in = 0, C_out = 0, K = 0;
-    };
-
-    // ---- AdainResBlk1d — F0/N building block. Optional `pool` (ConvTranspose1d)
-    // and optional `conv1x1` (1x1 Conv1d, no bias) when dim_in != dim_out.
-    struct AdainResBlk1d {
-        int dim_in  = 0;
-        int dim_out = 0;
-        bool upsample = false;     // 'nearest' if true, 'none' if false
-        bool learned_sc = false;   // dim_in != dim_out
-
-        AdaLNFc norm1_fc;          // for AdaIN1d on dim_in
-        AdaLNFc norm2_fc;          // for AdaIN1d on dim_out
-        Conv1d  conv1;             // (dim_out, dim_in, K=3, p=1)
-        Conv1d  conv2;             // (dim_out, dim_out, K=3, p=1)
-        Conv1d  pool;              // ConvTranspose1d(dim_in, dim_in, K=3, s=2, groups=dim_in,
-                                   //                  padding=1, output_padding=1)
-                                   // Stored weight shape: (dim_in, 1, 3) PyTorch convention
-                                   // (Conv*Transpose1d with groups=in, in_channels_per_group=1).
-        Conv1d  conv1x1;           // (dim_out, dim_in, 1, 1, 0, no bias)  — only if learned_sc
-    };
+    // ---- AdaLayerNorm fc projection / Conv1d / AdainResBlk1d are shared
+    // helpers in kokoro_internal.h (decoder.h reuses the same building blocks).
+    using AdaLNFc       = internal::AdaLNFc;
+    using Conv1d        = internal::Conv1d;
+    using AdainResBlk1d = internal::AdainResBlk1d;
 
     // ---- DurationEncoder
     BiLSTM   dur_enc_lstm_[3];     // BiLSTM(640->512) x 3
@@ -133,43 +109,6 @@ private:
     Conv1d  F0_proj_;              // (1, 256, 1)
     Conv1d  N_proj_;               // (1, 256, 1)
 
-    // Helpers --------------------------------------------------------------
-    // AdaLayerNorm (in DurationEncoder): in/out is (1, 512, T) channel-first.
-    // No learned affine on the LayerNorm itself; modulation comes from the
-    // fc(s) -> [gamma, beta] projection.
-    void ada_layer_norm(float* x, int C, int T, const float* style128,
-                        const AdaLNFc& fc) const;
-
-    // AdaIN1d (in F0/N branches): in/out is (1, C, T) channel-first.
-    // InstanceNorm1d (per-channel across T) with no learned affine in this
-    // checkpoint (the v0_19 .pth lacks `.norm.weight/.norm.bias`; PyTorch
-    // initializes them to (1, 0), an identity affine).
-    void ada_in_1d(float* x, int C, int T, const float* style128,
-                   const AdaLNFc& fc) const;
-
-    // Run one AdainResBlk1d (1, dim_in, T) -> (1, dim_out, Tout)
-    // where Tout = T (no upsample) or 2*T (upsample='nearest').
-    void run_adain_res_blk(const AdainResBlk1d& blk, const float* style128,
-                           const std::vector<float>& in_cf, int T,
-                           std::vector<float>& out_cf, int& T_out) const;
-
-    // Pool for upsample=nearest blocks: depthwise ConvTranspose1d
-    //   stride=2, kernel=3, groups=dim_in, padding=1, output_padding=1
-    // Input (C, T) channel-first; output (C, 2T) channel-first.
-    // Output element formula (PyTorch):
-    //   y[c, t_out] = bias[c] + sum over kernel positions k where
-    //     a valid input index i_in = ((t_out + padding - k) / stride) exists
-    //     and (t_out + padding - k) % stride == 0
-    //   y[c, t_out] += x[c, i_in] * w[c, 0, k]
-    // (groups=in, in_channels_per_group=1, out_channels_per_group=1.)
-    void conv_transpose_1d_pool(const Conv1d& pool,
-                                const std::vector<float>& in_cf, int C, int T,
-                                std::vector<float>& out_cf) const;
-
-    // Nearest-neighbor upsample by factor 2 (for the shortcut path).
-    // Input (C, T) -> output (C, 2T) with each input copied twice.
-    void upsample_nearest_2x(const std::vector<float>& in_cf, int C, int T,
-                             std::vector<float>& out_cf) const;
 };
 
 }}  // namespace cactus::kokoro

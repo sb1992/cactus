@@ -65,4 +65,73 @@ void bidirectional_lstm(const float* in, int T, int I, int H,
                         const float* b_ih_bwd, const float* b_hh_bwd,
                         std::vector<float>& out);
 
+// ---- Conv1d weight bundle (folded weight_norm) ---------------------------
+// Stored as (C_out, C_in, K) row-major, matching PyTorch nn.Conv1d.weight.
+struct Conv1d {
+    std::vector<float> w;
+    std::vector<float> b;       // empty for no-bias convs
+    int C_in = 0, C_out = 0, K = 0;
+};
+
+// ---- AdaLayerNorm / AdaIN1d fc projection: Linear(STYLE_DIM=128 -> 2*C) --
+struct AdaLNFc {
+    std::vector<float> w;       // (2C, 128)
+    std::vector<float> b;       // (2C,)
+};
+
+// ---- AdainResBlk1d (LeakyReLU variant, used by predictor F0/N branches and
+//      by decoder encode/decode blocks). Optional `pool` for upsample, optional
+//      `conv1x1` shortcut when dim_in != dim_out.
+struct AdainResBlk1d {
+    int dim_in  = 0;
+    int dim_out = 0;
+    bool upsample = false;      // 'nearest'-equivalent upsample if true
+    bool learned_sc = false;    // true iff dim_in != dim_out
+
+    AdaLNFc norm1_fc;           // for AdaIN1d on dim_in
+    AdaLNFc norm2_fc;           // for AdaIN1d on dim_out
+    Conv1d  conv1;              // (dim_out, dim_in, K=3, p=1)
+    Conv1d  conv2;              // (dim_out, dim_out, K=3, p=1)
+    Conv1d  pool;               // ConvTranspose1d depthwise (dim_in,1,3) s=2 p=1 op=1
+    Conv1d  conv1x1;            // (dim_out, dim_in, 1) no bias
+};
+
+// AdaIN1d: in/out is (1, C, T) channel-first, in place.
+//   InstanceNorm1d (per-channel across T) with no learned affine, then
+//   (1 + gamma(s)) * x + beta(s) where [gamma, beta] = fc(s).
+// `style128` is (128,). `eps` is the InstanceNorm epsilon.
+void ada_in_1d(float* x, int C, int T, const float* style128,
+               const AdaLNFc& fc, float eps);
+
+// AdaLayerNorm: in/out is (1, C, T) channel-first, in place.
+//   F.layer_norm over the channel axis (no affine), then
+//   (1 + gamma(s)) * x + beta(s).
+void ada_layer_norm(float* x, int C, int T, const float* style128,
+                    const AdaLNFc& fc, float eps);
+
+// Depthwise ConvTranspose1d "pool" used by AdainResBlk1d when upsampling.
+//   stride=2, kernel=3, groups=C, padding=1, output_padding=1.
+//   Weight shape (C, 1, 3); bias shape (C,).
+//   Input  (C, T)  channel-first.
+//   Output (C, 2T) channel-first.
+void conv_transpose_1d_depthwise_pool(const Conv1d& pool,
+                                       const std::vector<float>& in_cf,
+                                       int C, int T,
+                                       std::vector<float>& out_cf);
+
+// Nearest-neighbor upsample by factor 2 over the time axis.
+//   Input (C, T) -> output (C, 2T) channel-first.
+void upsample_nearest_2x(const std::vector<float>& in_cf, int C, int T,
+                         std::vector<float>& out_cf);
+
+// One AdainResBlk1d forward pass. Input/output are channel-first.
+//   in_cf shape  : (dim_in,  T)
+//   out_cf shape : (dim_out, T_out) where T_out = T (no upsample) or 2T.
+//   leaky_slope  : 0.2 in Kokoro
+//   inst_eps     : InstanceNorm epsilon (1e-5 in Kokoro)
+void run_adain_res_blk(const AdainResBlk1d& blk, const float* style128,
+                       const std::vector<float>& in_cf, int T,
+                       std::vector<float>& out_cf, int& T_out,
+                       float leaky_slope, float inst_eps);
+
 }}}  // namespace cactus::kokoro::internal
