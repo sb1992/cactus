@@ -37,6 +37,7 @@ site_docs/
 *.npy
 tests/plan.md
 tests/assets/test_wav_info.txt
+tests/fixtures/data/
 vision_activations.json
 gemma-4-eap-extras/
 .githooks/
