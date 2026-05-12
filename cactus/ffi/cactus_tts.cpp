@@ -42,6 +42,21 @@ extern "C" int cactus_tts_synthesize(cactus_tts* h,
     return 0;
 }
 
+extern "C" int cactus_tts_synthesize_phonemes(cactus_tts* h,
+                                              const int64_t* ids, size_t n_ids,
+                                              float speed,
+                                              float* out, size_t* out_n) {
+    if (!h || !ids || !out_n) return -1;
+    if (speed != 1.0f) return -4;
+    std::vector<float> buf;
+    if (!h->model.synthesize_with_phonemes(ids, static_cast<int>(n_ids), buf)) return -2;
+    const size_t cap = *out_n;
+    *out_n = buf.size();
+    if (out == nullptr || cap < buf.size()) return -3;
+    std::memcpy(out, buf.data(), buf.size() * sizeof(float));
+    return 0;
+}
+
 extern "C" int cactus_tts_sample_rate(cactus_tts* h) {
     (void)h;
     return cactus::kokoro::KokoroModel::SAMPLE_RATE;

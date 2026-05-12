@@ -1,10 +1,19 @@
 """cactus run-tts -- synthesize text to a WAV file using Kokoro.
 
-Thin Python ctypes wrapper around the cactus_tts C FFI. No model logic
-lives here; the C++ KokoroModel does everything (G2P, encoders, predictor,
-decoder, generator, iSTFT). This module just loads libcactus.dylib/.so,
-calls the four FFI entry points, converts f32 -> int16, and writes a
-mono 16-bit WAV at 24 kHz.
+Thin Python ctypes wrapper around the cactus_tts C FFI. The C++ KokoroModel
+runs the encoders, predictor, decoder, generator, and iSTFT. Phonemization
+lives on the Python side via misaki (the official Kokoro phonemizer) so that
+the C++ runtime stays Python-free and we sidestep the imperfect ARPAbet->IPA
+mapping baked into the legacy text path.
+
+Pipeline:
+    text -> misaki.en.G2P -> IPA phonemes -> Kokoro vocab IDs (i64)
+                                                 |
+                                                 v
+                                cactus_tts_synthesize_phonemes
+                                                 |
+                                                 v
+                              KokoroModel::synthesize_with_phonemes
 """
 
 from __future__ import annotations
@@ -12,6 +21,7 @@ from __future__ import annotations
 import argparse
 import array
 import ctypes
+import json
 import os
 import sys
 import wave
@@ -60,6 +70,16 @@ _lib.cactus_tts_synthesize.argtypes = [
     ctypes.POINTER(ctypes.c_size_t),
 ]
 
+_lib.cactus_tts_synthesize_phonemes.restype = ctypes.c_int
+_lib.cactus_tts_synthesize_phonemes.argtypes = [
+    ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_int64),
+    ctypes.c_size_t,
+    ctypes.c_float,
+    ctypes.POINTER(ctypes.c_float),
+    ctypes.POINTER(ctypes.c_size_t),
+]
+
 _lib.cactus_tts_sample_rate.restype = ctypes.c_int
 _lib.cactus_tts_sample_rate.argtypes = [ctypes.c_void_p]
 
@@ -79,27 +99,108 @@ _DEFAULT_VOICE   = _REPO_ROOT / "tests" / "fixtures" / "data" / "voice_af_bella_
 
 
 # ---------------------------------------------------------------------------
+# Phonemization (misaki + Kokoro vocab)
+# ---------------------------------------------------------------------------
+
+# Search hints for the Kokoro config.json that holds the IPA -> token-ID map.
+# Currently shipped by the `hexgrad/Kokoro-82M` HF repo (n_token=178, vocab
+# has 114 entries; the gap covers reserved IDs).
+_HF_CONFIG_HINTS = [
+    Path.home() / ".cache" / "huggingface" / "hub" / "models--hexgrad--Kokoro-82M",
+]
+
+
+def _load_kokoro_vocab() -> dict:
+    """Locate Kokoro's IPA-char -> token-ID dict from the HF config cache."""
+    for root in _HF_CONFIG_HINTS:
+        if not root.exists():
+            continue
+        for cfg in root.rglob("config.json"):
+            try:
+                with open(cfg) as f:
+                    obj = json.load(f)
+            except Exception:
+                continue
+            if "vocab" in obj and obj.get("n_token") == 178:
+                return obj["vocab"]
+    sys.exit(
+        "Could not locate Kokoro config.json with vocab map. Populate the "
+        "HF cache via `python -c 'from kokoro import KModel; "
+        "KModel(repo_id=\"hexgrad/Kokoro-82M\")'` once."
+    )
+
+
+def _phonemes_to_ids(phonemes: str, vocab: dict) -> list[int]:
+    """Map an IPA string to Kokoro vocab IDs, wrapping with KModel pad tokens.
+
+    KModel.forward (model.py:131) prepends + appends a 0 token. We mirror that
+    here so the C++ side can take ids verbatim.
+    """
+    ids: list[int] = [0]
+    skipped: list[str] = []
+    for ch in phonemes:
+        if ch in vocab:
+            ids.append(int(vocab[ch]))
+        else:
+            skipped.append(ch)
+    ids.append(0)
+    if skipped:
+        sys.stderr.write(
+            f"warn: dropped {len(skipped)} unmapped phoneme chars: "
+            f"{''.join(skipped)!r}\n"
+        )
+    return ids
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="cactus run-tts",
                                 description="Synthesize text to a WAV file with Kokoro.")
-    p.add_argument("text", help="Text to synthesize")
+    p.add_argument("text", help="Text to synthesize (ignored if --phonemes is set)")
     p.add_argument("--out", default="out.wav", help="Output WAV path (default: out.wav)")
     p.add_argument("--weights", default=str(_DEFAULT_WEIGHTS),
                    help=f"Kokoro flat weights directory (default: {_DEFAULT_WEIGHTS})")
     p.add_argument("--dict", default=str(_DEFAULT_DICT),
-                   help=f"G2P dictionary path (default: {_DEFAULT_DICT})")
+                   help=f"G2P dictionary path (default: {_DEFAULT_DICT}). "
+                        "Unused now that phonemization runs in Python via misaki, "
+                        "but KokoroModel::load still requires a valid dict file.")
     p.add_argument("--voice", default=str(_DEFAULT_VOICE),
                    help=f"Single-voice raw f32 file, 511*256 floats "
                         f"(default: {_DEFAULT_VOICE})")
     p.add_argument("--speed", type=float, default=1.0, help="Speech rate (default: 1.0)")
+    p.add_argument("--phonemes", default=None,
+                   help="IPA phoneme string (bypass misaki). Useful for testing.")
     return p
 
 
 def main(argv=None) -> int:
     args = _build_parser().parse_args(argv)
+
+    # 1) Phonemize on the Python side (misaki) unless the caller passed IPA directly.
+    if args.phonemes is not None:
+        phonemes = args.phonemes
+    else:
+        try:
+            from misaki import en as misaki_en
+        except ImportError:
+            sys.exit(
+                "misaki is required for the text path. Install with "
+                "`pip install misaki[en]` or pass --phonemes <IPA-string>."
+            )
+        g2p = misaki_en.G2P(trf=False, british=False)
+        phonemes, _tokens = g2p(args.text)
+
+    vocab = _load_kokoro_vocab()
+    ids = _phonemes_to_ids(phonemes, vocab)
+    if len(ids) <= 2:
+        sys.exit("phonemizer produced no usable IDs (only the pad tokens)")
+
+    print(f"Phonemes: {phonemes}")
+    preview = ids[:10] + (["..."] + ids[-3:] if len(ids) > 13 else [])
+    print(f"IDs ({len(ids)}): {preview}")
 
     handle = _lib.cactus_tts_create(args.weights.encode(),
                                     args.dict.encode(),
@@ -111,23 +212,25 @@ def main(argv=None) -> int:
         )
 
     try:
+        ids_arr = (ctypes.c_int64 * len(ids))(*ids)
+
         # Size query: NULL out + n=0 -> required size in *out_n.
         n = ctypes.c_size_t(0)
-        rc = _lib.cactus_tts_synthesize(
-            handle, args.text.encode(), ctypes.c_float(args.speed),
+        rc = _lib.cactus_tts_synthesize_phonemes(
+            handle, ids_arr, len(ids), ctypes.c_float(args.speed),
             None, ctypes.byref(n),
         )
         # rc == -3 is the expected "buffer too small / size returned" code.
         if n.value == 0:
-            sys.exit(f"synthesize size query returned 0 (rc={rc})")
+            sys.exit(f"synthesize_phonemes size query returned 0 (rc={rc})")
 
         buf = (ctypes.c_float * n.value)()
-        rc = _lib.cactus_tts_synthesize(
-            handle, args.text.encode(), ctypes.c_float(args.speed),
+        rc = _lib.cactus_tts_synthesize_phonemes(
+            handle, ids_arr, len(ids), ctypes.c_float(args.speed),
             buf, ctypes.byref(n),
         )
         if rc != 0:
-            sys.exit(f"synthesize failed (rc={rc})")
+            sys.exit(f"synthesize_phonemes failed (rc={rc})")
 
         sr = _lib.cactus_tts_sample_rate(handle)
 
