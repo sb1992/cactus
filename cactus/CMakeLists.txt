@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(Cactus LANGUAGES CXX)
+project(Cactus LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
@@ -105,6 +105,7 @@ set(COMMON_INCLUDES
     models
     npu
     telemetry
+    ${CMAKE_CURRENT_SOURCE_DIR}/../libs/pffft
 )
 
 function(configure_cactus_target target_name)
@@ -148,7 +149,25 @@ target_compile_options(cactus_i8mm_obj PRIVATE ${I8MM_MARCH_FLAG})
 set_target_properties(cactus_i8mm_obj PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_definitions(cactus_i8mm_obj PRIVATE CACTUS_COMPILE_I8MM __ARM_FEATURE_MATMUL_INT8=1)
 
-set(EXTRA_OBJECTS $<TARGET_OBJECTS:cactus_i8mm_obj>)
+# --- Vendored PFFFT (BSD-3) — single-file FFT library used by TTS pipeline.
+# Both pffft.c and fftpack.c are required: pffft.c uses fftpack as the
+# fallback FFT for sizes the SIMD path can't handle natively. PFFFT
+# auto-detects NEON on ARM64 via __ARM_NEON; no manual flags needed.
+# Built as an OBJECT lib so third-party C warnings don't fail the
+# project's strict -Wall -Wextra -pedantic CXX flags.
+set(PFFFT_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/../libs/pffft/pffft.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../libs/pffft/fftpack.c
+)
+add_library(cactus_pffft_obj OBJECT ${PFFFT_SOURCES})
+target_include_directories(cactus_pffft_obj PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../libs/pffft)
+set_target_properties(cactus_pffft_obj PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_compile_options(cactus_pffft_obj PRIVATE -w)
+
+set(EXTRA_OBJECTS
+    $<TARGET_OBJECTS:cactus_i8mm_obj>
+    $<TARGET_OBJECTS:cactus_pffft_obj>
+)
 
 add_library(cactus STATIC ${COMMON_SOURCES} ${EXTRA_OBJECTS})
 configure_cactus_target(cactus)
