@@ -1,6 +1,6 @@
-"""Kokoro-82M model converter (subset: text_encoder + bert only for now).
+"""Kokoro-82M model converter (full: text_encoder + bert + predictor + decoder + bert_encoder).
 
-Plan 2 Task 5b/5c. Decoder and predictor deferred.
+Plan 2 Task 5 final. Converts ALL 548 .pth tensors to cactus .weights files.
 
 Loads kokoro-v0_19.pth, applies:
   1. Strip `net/<submodule>/` top-level prefix and `module.` DataParallel prefix
@@ -8,12 +8,16 @@ Loads kokoro-v0_19.pth, applies:
   3. Repack bidirectional LSTM into cactus_lstm_cell-compatible layout
   4. Per-tensor groupwise INT8 (or auto-FP16) via tensor_io.save_tensor_with_header
 
+After folding the 86 weight_norm pairs in the .pth, ~459 .weights files are emitted.
+
 Output: per-tensor .weights files in cactus's binary format under assets/kokoro/weights/.
 """
 
+import json
 import os
 import re
 import struct
+import subprocess
 import sys
 from collections import OrderedDict
 from pathlib import Path
@@ -129,6 +133,39 @@ def _test_fold_weight_norm():
     print(f"  fold_weight_norm: ok (max abs err {err:.2e})")
 
 
+def _test_backward_compat_5c():
+    """Verify the full naming pipeline (literal-precedence + function fallback)
+    reproduces all 46 filenames shipped in 5c.
+
+    Note: `_kokoro_canonical_to_filename` is deterministic but does not match
+    the 5c literals for entries that were hand-shortened (e.g. `cnn.0.0` ->
+    `cnn_0_conv`, `bert/embeddings.word_embeddings.weight` ->
+    `bert_word_embeddings`, lstm prefix collapsed). LITERAL_NAME_MAP_5C is the
+    source of truth for those - this test makes sure `_ensure_name_map()`
+    correctly composes the two so 5c output stays byte-identical."""
+    # Function-side determinism check on a NEW tensor name (not in literal-46)
+    sample = "predictor/text_encoder.lstms.0.weight_ih_l0"
+    assert _kokoro_canonical_to_filename(sample) == \
+        "predictor_text_encoder_lstms_0_lstm_fwd_0_weight_ih", \
+        f"function determinism failed for {sample}"
+    print(f"  function-side determinism: ok")
+    if not Path("assets/kokoro/kokoro-v0_19.pth").exists():
+        print("  (literal-precedence check skipped: checkpoint not present)")
+        return
+    name_map = _ensure_name_map()
+    n_compat = 0
+    for canonical, expected in LITERAL_NAME_MAP_5C.items():
+        if canonical not in name_map:
+            raise AssertionError(f"5c entry {canonical!r} missing from full name map")
+        got = name_map[canonical]
+        if got != expected:
+            raise AssertionError(
+                f"5c regression {canonical!r}: name_map gave {got!r}, want {expected!r}"
+            )
+        n_compat += 1
+    print(f"  backward compat with literal-46 (via _ensure_name_map): ok ({n_compat}/{len(LITERAL_NAME_MAP_5C)})")
+
+
 def _test_apply_folding_dict():
     # Build a tiny state dict with one weight-norm pair + one normal tensor
     sd = {
@@ -151,11 +188,13 @@ def _test_apply_folding_dict():
 # ------------------------------------------------------------------------
 
 
-# Mapping table from canonical (post-strip + post-fold) name -> output basename.
-# Filenames are intentionally chosen so save_tensor_with_header's auto-FP16
-# substring detector ('norm', 'bias', 'position_embeddings') routes the correct
-# tensors to FP16. Everything else goes INT8 (1D or 2D).
-TENSOR_NAME_MAP = {
+# --- Backward-compat literal map (frozen) ---
+#
+# These 46 entries shipped in 5c with hand-picked filename shortenings (e.g.
+# `cnn.0.0` -> `cnn_0_conv` instead of `cnn_0_0`, BERT prefix collapses).
+# They MUST stay byte-identical so the existing .weights files keep round-tripping.
+# All NEW tensors get filenames from `_kokoro_canonical_to_filename` instead.
+LITERAL_NAME_MAP_5C = {
     # ---- text_encoder ----
     "text_encoder/embedding.weight":              "text_encoder_embedding",
     # cnn block 0
@@ -215,10 +254,116 @@ TENSOR_NAME_MAP = {
 }
 
 
-def _flatten_kokoro_checkpoint(ckpt_path: str) -> "OrderedDict":
+def _kokoro_canonical_to_filename(name: str) -> str:
+    """Map a canonical (post-strip + post-fold) tensor name to a cactus filename basename.
+
+    Convention used for predictor/decoder/bert_encoder tensors:
+      - submodule prefix preserved at the start
+      - dots become underscores
+      - LSTM gates `weight_ih_l<N>[_reverse]` -> `lstm_{fwd,bwd}_<N>_weight_ih`
+        (so the filename matches the text_encoder LSTM convention from 5c)
+      - Trailing `LayerNorm.weight/bias` -> `norm_weight/norm_bias`
+        (substring 'norm' in filename triggers FP16 auto-detect in tensor_io)
+      - Trailing `_<N>_gamma` / `_<N>_beta` -> `_<N>_norm_gamma` / `_<N>_norm_beta`
+        (covers AdaIN-style scale params; safety transform - not exercised by the
+        post-fold predictor/decoder names but harmless if they appear)
+
+    The filename is checked for filesystem safety + uniqueness inside
+    `_ensure_name_map`. Backward compat with LITERAL_NAME_MAP_5C is enforced
+    in the same function (literal entries take precedence).
+    """
+    if "/" in name:
+        submodule, rest = name.split("/", 1)
+    else:
+        submodule, rest = "", name
+
+    # LSTM gates: weight_ih_l<N>[_reverse], weight_hh_l<N>[_reverse], bias_ih/hh
+    m = re.match(r"^(.*?)\.?(weight_ih|weight_hh|bias_ih|bias_hh)_l(\d+)(_reverse)?$", rest)
+    if m:
+        path, gate, layer_idx, rev = m.groups()
+        direction = "bwd" if rev else "fwd"
+        prefix_part = path.rstrip(".")
+        if prefix_part:
+            prefix_part = prefix_part.replace(".", "_") + "_"
+        out_rest = f"{prefix_part}lstm_{direction}_{layer_idx}_{gate}"
+    else:
+        out_rest = rest.replace(".", "_")
+        out_rest = out_rest.replace("_LayerNorm_weight", "_norm_weight")
+        out_rest = out_rest.replace("_LayerNorm_bias", "_norm_bias")
+        out_rest = re.sub(r"_(\d+)_gamma$", r"_\1_norm_gamma", out_rest)
+        out_rest = re.sub(r"_(\d+)_beta$", r"_\1_norm_beta", out_rest)
+
+    return f"{submodule}_{out_rest}" if submodule else out_rest
+
+
+# Module-level cache; populated by _ensure_name_map() on first call.
+TENSOR_NAME_MAP = None
+
+
+def _ensure_name_map(ckpt_path: str = "assets/kokoro/kokoro-v0_19.pth") -> dict:
+    """Load the .pth, walk + strip + fold to discover all canonical names, then
+    build {canonical -> filename basename} for the entire model.
+
+    LITERAL_NAME_MAP_5C entries take precedence (frozen for backward compat with
+    the .weights files shipped in 5c). All others are produced by the
+    `_kokoro_canonical_to_filename` generator. Asserts uniqueness of filenames
+    and filesystem-safety, then caches the result on the module so subsequent
+    calls are O(1).
+    """
+    global TENSOR_NAME_MAP
+    if TENSOR_NAME_MAP is not None:
+        return TENSOR_NAME_MAP
+
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    flat: "OrderedDict[str, torch.Tensor]" = OrderedDict()
+
+    def _walk(node, prefix=""):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                _walk(v, prefix + "/" + str(k) if prefix else str(k))
+        elif hasattr(node, "shape") and hasattr(node, "dtype"):
+            flat[prefix] = node
+    _walk(ckpt)
+
+    renamed = OrderedDict((strip_kokoro_prefix(k), v) for k, v in flat.items())
+    folded = apply_weight_norm_folding(renamed)
+
+    name_map: "OrderedDict[str, str]" = OrderedDict()
+    for canonical in folded:
+        if canonical in LITERAL_NAME_MAP_5C:
+            name_map[canonical] = LITERAL_NAME_MAP_5C[canonical]
+        else:
+            name_map[canonical] = _kokoro_canonical_to_filename(canonical)
+
+    # Uniqueness + filesystem-safety check
+    seen: dict[str, str] = {}
+    bad_chars = []
+    safe_re = re.compile(r"^[a-zA-Z0-9_\-]+$")
+    for canonical, fn in name_map.items():
+        if not safe_re.match(fn):
+            bad_chars.append((canonical, fn))
+        if fn in seen:
+            raise AssertionError(
+                f"Duplicate filename {fn!r}: from {seen[fn]!r} and {canonical!r}"
+            )
+        seen[fn] = canonical
+    if bad_chars:
+        raise AssertionError(
+            f"Filesystem-unsafe filenames: {bad_chars[:5]}"
+        )
+
+    TENSOR_NAME_MAP = name_map
+    return TENSOR_NAME_MAP
+
+
+def _flatten_kokoro_checkpoint(ckpt_path: str, scope: tuple[str, ...] | None = None) -> "OrderedDict":
     """Load .pth, walk the nested dict, return flat {dotted_name: tensor} after
-    stripping kokoro prefixes, restricting to text_encoder + bert, and folding
-    weight_norm pairs."""
+    stripping kokoro prefixes and folding weight_norm pairs.
+
+    If `scope` is provided, only tensors whose canonical name starts with one
+    of the given prefixes are returned (kept for compatibility with existing
+    callers; default of None returns ALL tensors).
+    """
     print(f"Loading {ckpt_path} ...")
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     flat: "OrderedDict[str, torch.Tensor]" = OrderedDict()
@@ -232,9 +377,9 @@ def _flatten_kokoro_checkpoint(ckpt_path: str) -> "OrderedDict":
     _walk(ckpt)
 
     renamed = OrderedDict((strip_kokoro_prefix(k), v) for k, v in flat.items())
-    SCOPE = ("text_encoder/", "bert/")
-    scoped = OrderedDict((k, v) for k, v in renamed.items() if k.startswith(SCOPE))
-    return apply_weight_norm_folding(scoped)
+    if scope is not None:
+        renamed = OrderedDict((k, v) for k, v in renamed.items() if k.startswith(scope))
+    return apply_weight_norm_folding(renamed)
 
 
 # ------------------------------------------------------------------------
@@ -343,23 +488,66 @@ def load_tensor_with_header(path: str) -> tuple[np.ndarray, list[int]]:
 # ------------------------------------------------------------------------
 
 
-def convert_kokoro_subset_weights(ckpt_path: str = "assets/kokoro/kokoro-v0_19.pth",
-                                  out_dir: str = "assets/kokoro/weights"):
-    """Convert text_encoder + bert subset of Kokoro to cactus .weights files."""
-    folded = _flatten_kokoro_checkpoint(ckpt_path)
+def _git_head_sha() -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
+        )
+        return out.decode().strip()
+    except Exception:
+        return "unknown"
 
-    missing_in_map = [k for k in folded if k not in TENSOR_NAME_MAP]
-    missing_in_data = [k for k in TENSOR_NAME_MAP if k not in folded]
+
+def _write_manifest(out_dir: Path, name_map: dict, total_bytes: int,
+                    n_int8: int, n_fp16: int) -> None:
+    """Write MANIFEST.json describing the converted weights directory."""
+    submodule_prefixes = ["text_encoder/", "bert/", "bert_encoder/", "predictor/", "decoder/"]
+    submodule_counts = {
+        prefix: sum(1 for k in name_map if k.startswith(prefix))
+        for prefix in submodule_prefixes
+    }
+    manifest = {
+        "model": "kokoro-v0_19",
+        "source": "hexgrad/kLegacy/v0.19/kokoro-v0_19.pth",
+        "converter_commit": _git_head_sha(),
+        "n_tensors": len(name_map),
+        "submodule_counts": submodule_counts,
+        "total_size_bytes": total_bytes,
+        "precision_split": {"int8": n_int8, "fp16": n_fp16},
+    }
+    with open(out_dir / "MANIFEST.json", "w") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"  Wrote {out_dir / 'MANIFEST.json'}")
+
+
+def convert_kokoro_subset_weights(ckpt_path: str = "assets/kokoro/kokoro-v0_19.pth",
+                                  out_dir: str = "assets/kokoro/weights",
+                                  scope: tuple[str, ...] | None = None,
+                                  verbose_per_tensor: bool = False):
+    """Convert (all of, or a scoped subset of) Kokoro to cactus .weights files.
+
+    Default behavior (scope=None) converts ALL submodules: text_encoder, bert,
+    predictor, decoder, bert_encoder. Pass `scope=("text_encoder/",)` etc. to
+    restrict.
+    """
+    name_map = _ensure_name_map(ckpt_path)
+    folded = _flatten_kokoro_checkpoint(ckpt_path, scope=scope)
+
+    missing_in_map = [k for k in folded if k not in name_map]
     if missing_in_map:
-        print(f"ERROR: {len(missing_in_map)} subset tensors have no filename mapping:")
+        print(f"ERROR: {len(missing_in_map)} tensors have no filename mapping:")
         for k in missing_in_map[:20]:
             print(f"    {k}")
         raise SystemExit(1)
-    if missing_in_data:
-        print(f"ERROR: {len(missing_in_data)} mapped names not present in subset:")
-        for k in missing_in_data[:20]:
-            print(f"    {k}")
-        raise SystemExit(1)
+
+    if scope is None:
+        # Sanity: all mapped names must be present in folded data
+        missing_in_data = [k for k in name_map if k not in folded]
+        if missing_in_data:
+            print(f"ERROR: {len(missing_in_data)} mapped names not present in checkpoint:")
+            for k in missing_in_data[:20]:
+                print(f"    {k}")
+            raise SystemExit(1)
 
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -368,34 +556,37 @@ def convert_kokoro_subset_weights(ckpt_path: str = "assets/kokoro/kokoro-v0_19.p
     n_fp16 = 0
     total_bytes = 0
     for canonical_name, tensor in folded.items():
-        out_basename = TENSOR_NAME_MAP[canonical_name]
+        out_basename = name_map[canonical_name]
         target = out_path / (out_basename + ".weights")
         # Pass tensor as-is (torch tensor) - save_tensor_with_header handles it.
-        # We DO pass precision='INT8' so the auto-detect runs against the filename;
+        # We pass precision='INT8' so the auto-detect runs against the filename;
         # it will demote to FP16 for 'norm'/'bias'/'position_embeddings' substrings,
         # and 3D tensors fall through to FP16 by shape (no INT8 3D path in tensor_io).
         save_tensor_with_header(tensor, target, precision='INT8')
 
         size = target.stat().st_size
         total_bytes += size
-        # Heuristic detect: read precision byte from header (offset 48)
         with open(target, "rb") as f:
             f.seek(48)
             prec_code = struct.unpack("<I", f.read(4))[0]
         is_fp16 = (prec_code == 1)
         n_fp16 += int(is_fp16)
         n_int8 += int(not is_fp16)
-        shape_str = "x".join(str(d) for d in tensor.shape)
-        print(f"  wrote {out_basename}.weights  shape={shape_str:<14s} "
-              f"prec={'FP16' if is_fp16 else 'INT8'}  size={size:>9,d}")
+        if verbose_per_tensor:
+            shape_str = "x".join(str(d) for d in tensor.shape)
+            print(f"  wrote {out_basename}.weights  shape={shape_str:<14s} "
+                  f"prec={'FP16' if is_fp16 else 'INT8'}  size={size:>9,d}")
 
     print(f"\nTotal: {len(folded)} tensors, {total_bytes:,} bytes "
           f"({total_bytes / 1024 / 1024:.2f} MB) in {out_dir}/")
     print(f"  INT8: {n_int8}   FP16: {n_fp16}")
+    if scope is None:
+        _write_manifest(out_path, name_map, total_bytes, n_int8, n_fp16)
 
 
 def round_trip_verify(ckpt_path: str = "assets/kokoro/kokoro-v0_19.pth",
-                      weights_dir: str = "assets/kokoro/weights"):
+                      weights_dir: str = "assets/kokoro/weights",
+                      scope: tuple[str, ...] | None = None):
     """Load each .weights file back, dequantize, compare to original tensor.
 
     Acceptance:
@@ -404,16 +595,18 @@ def round_trip_verify(ckpt_path: str = "assets/kokoro/kokoro-v0_19.pth",
     Fails loudly if anything diverges or is missing.
     """
     print(f"\nRound-trip verification...")
-    folded = _flatten_kokoro_checkpoint(ckpt_path)
+    name_map = _ensure_name_map(ckpt_path)
+    folded = _flatten_kokoro_checkpoint(ckpt_path, scope=scope)
 
     errors = 0
+    failures: list[tuple[str, str, float]] = []
     worst_rel = 0.0
     worst_name = ""
     n_int8 = 0
     n_fp16 = 0
 
     for canonical_name, original in folded.items():
-        out_basename = TENSOR_NAME_MAP[canonical_name]
+        out_basename = name_map[canonical_name]
         path = Path(weights_dir) / (out_basename + ".weights")
         if not path.exists():
             print(f"  MISSING: {path}")
@@ -467,6 +660,7 @@ def round_trip_verify(ckpt_path: str = "assets/kokoro/kokoro-v0_19.pth",
             print(f"  REL_ERR  {out_basename}  ({'FP16' if is_fp16 else 'INT8'})  "
                   f"rel={rel_err:.4e} > {bar:.0e}  abs={max_abs_err:.4e}")
             errors += 1
+            failures.append((out_basename, "FP16" if is_fp16 else "INT8", rel_err))
 
     print(f"\n  Checked {len(folded)} tensors  ({n_int8} INT8, {n_fp16} FP16)")
     print(f"  Worst rel-err: {worst_rel:.4e}  ({worst_name})")
@@ -474,6 +668,9 @@ def round_trip_verify(ckpt_path: str = "assets/kokoro/kokoro-v0_19.pth",
         print(f"  PASS - all tensors round-tripped within tolerance.")
     else:
         print(f"  FAIL - {errors} / {len(folded)} tensors exceeded tolerance.")
+        print("  Failure list:")
+        for name, prec, rel in sorted(failures, key=lambda x: -x[2]):
+            print(f"    {name}  ({prec})  rel-err={rel:.4e}")
         raise SystemExit(1)
 
 
@@ -482,6 +679,7 @@ if __name__ == "__main__":
         _test_strip_prefix()
         _test_fold_weight_norm()
         _test_apply_folding_dict()
+        _test_backward_compat_5c()
         print("All helper self-tests passed.")
         sys.exit(0)
 
