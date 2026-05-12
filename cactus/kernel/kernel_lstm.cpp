@@ -1,8 +1,47 @@
 #include "kernel.h"
+#include "kernel_lstm.h"
 #include "kernel_utils.h"
 #include <arm_neon.h>
 #include <cmath>
 #include <vector>
+
+static inline float cactus_lstm_sigmoidf(float v) {
+    return 1.0f / (1.0f + std::exp(-v));
+}
+
+void cactus_lstm_cell(
+    const float* x, const float* h_in, const float* c_in,
+    const float* W_ih, const float* W_hh,
+    const float* b_ih, const float* b_hh,
+    float* h_out, float* c_out,
+    int I, int H)
+{
+    // gates = W_ih @ x + b_ih + W_hh @ h_in + b_hh
+    std::vector<float> gates(static_cast<size_t>(4) * H);
+    for (int g = 0; g < 4 * H; ++g) {
+        float acc = b_ih[g] + b_hh[g];
+        const float* w_ih_row = W_ih + static_cast<size_t>(g) * I;
+        for (int i = 0; i < I; ++i) acc += w_ih_row[i] * x[i];
+        const float* w_hh_row = W_hh + static_cast<size_t>(g) * H;
+        for (int j = 0; j < H; ++j) acc += w_hh_row[j] * h_in[j];
+        gates[g] = acc;
+    }
+
+    // PyTorch nn.LSTMCell gate order: [i, f, g, o] each of length H
+    const float* gi = gates.data() + 0 * H;
+    const float* gf = gates.data() + 1 * H;
+    const float* gg = gates.data() + 2 * H;
+    const float* go = gates.data() + 3 * H;
+
+    for (int j = 0; j < H; ++j) {
+        const float i_t = cactus_lstm_sigmoidf(gi[j]);
+        const float f_t = cactus_lstm_sigmoidf(gf[j]);
+        const float g_t = std::tanh(gg[j]);
+        const float o_t = cactus_lstm_sigmoidf(go[j]);
+        c_out[j] = f_t * c_in[j] + i_t * g_t;
+        h_out[j] = o_t * std::tanh(c_out[j]);
+    }
+}
 
 void cactus_lstm_cell_f16(
     const __fp16* x_input,
