@@ -44,5 +44,6 @@ gemma-4-eap-extras/
 assets/kokoro/*.onnx
 assets/kokoro/*.pth
 assets/kokoro/checkpoint_inspection.txt
+assets/kokoro/converter_*_inspection.txt
 assets/kokoro/voices.json
 assets/kokoro/voices.bin
