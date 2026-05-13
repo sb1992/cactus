@@ -190,7 +190,23 @@ def main(argv=None) -> int:
                 "misaki is required for the text path. Install with "
                 "`pip install misaki[en]` or pass --phonemes <IPA-string>."
             )
-        g2p = misaki_en.G2P(trf=False, british=False)
+        # Enable misaki's espeak-ng-based letter-to-sound fallback so
+        # out-of-vocabulary words (proper nouns, loanwords, etc.) get a
+        # phoneme approximation instead of misaki's "❓" unk marker, which
+        # would later be dropped by _phonemes_to_ids and produce silence
+        # at the corresponding position in the audio.
+        fallback = None
+        try:
+            from misaki import espeak as misaki_espeak
+            fallback = misaki_espeak.EspeakFallback(british=False)
+        except Exception as e:
+            sys.stderr.write(
+                f"warn: misaki[espeak] L2S fallback unavailable ({e}); "
+                "OOV words will be dropped from synthesis. Install with "
+                "`pip install misaki[espeak]` (and ensure espeak-ng is "
+                "available) for full coverage.\n"
+            )
+        g2p = misaki_en.G2P(trf=False, british=False, fallback=fallback)
         phonemes, _tokens = g2p(args.text)
 
     vocab = _load_kokoro_vocab()
